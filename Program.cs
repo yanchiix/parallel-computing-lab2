@@ -6,18 +6,47 @@ using System.Globalization;
 
 class Program
 {
-    static void ThreadFuncMutex(int[] arr, int start, int end, ref int max, ref int count, object mtx)
+    static void ThreadFuncAtomic(int[] array, int startIndex, int finalIndex, ref int largestNumber, ref int count)
     {
-        for (int i = start; i < end; i++)
+        for (int i = startIndex; i < finalIndex; i++)
         {
-            lock (mtx)
+            while (true)
             {
-                if (arr[i] > max)
+                int prevLargestNumber = Volatile.Read(ref largestNumber);
+
+                if (array[i] > prevLargestNumber)
                 {
-                    max = arr[i];
+                    if (Interlocked.CompareExchange(ref largestNumber, array[i], prevLargestNumber) == prevLargestNumber)
+                    {
+                        Interlocked.Exchange(ref count, 1);
+                        break;
+                    }
+                }
+                else if (array[i] == prevLargestNumber)
+                {
+                    Interlocked.Increment(ref count);
+                    break;
+                }
+                else
+                {
+                    break;
+                }
+            }
+        }
+    }
+
+    static void ThreadFuncMutex(int[] array, int startIndex, int finalIndex, ref int largestNumber, ref int count, object gateMutex)
+    {
+        for (int i = startIndex; i < finalIndex; i++)
+        {
+            lock (gateMutex)
+            {
+                if (array[i] > largestNumber)
+                {
+                    largestNumber = array[i];
                     count = 1;
                 }
-                else if (arr[i] == max)
+                else if (array[i] == largestNumber)
                 {
                     count++;
                 }
@@ -25,60 +54,130 @@ class Program
         }
     }
 
-    static double FindMaxSeq(int[] arr, int n)
+    static double DefFunc(int[] array, int arrLen)
     {
-        int max = int.MinValue;
-        int count = 0;
+        int largestNumber = int.MinValue;
+        int countNum = 0;
+
         Stopwatch sw = Stopwatch.StartNew();
-        for (int i = 0; i < n; i++)
+
+        for (int i = 0; i < arrLen; i++)
         {
-            if (arr[i] > max) { max = arr[i]; count = 1; }
-            else if (arr[i] == max) { count++; }
+            if (array[i] > largestNumber)
+            {
+                largestNumber = array[i];
+                countNum = 1;
+            }
+            else if (array[i] == largestNumber)
+            {
+                countNum++;
+            }
         }
+
         sw.Stop();
+        Console.WriteLine($"single:\tlargest: {largestNumber}\tcount: {countNum}\ttime: {sw.Elapsed.TotalMilliseconds:F4} ms");
         return sw.Elapsed.TotalMilliseconds;
     }
 
-    static double FindMaxMutex(int p, int[] arr, int n)
+    static double ThreadsAtomic(int threadNum, int[] array, int arrLen)
     {
-        Thread[] threads = new Thread[p];
-        int step = n / p;
-        int max = int.MinValue;
-        int count = 0;
-        object mtx = new object();
+        Thread[] threads = new Thread[threadNum];
+        int numsInThread = arrLen;
+
+        if (threadNum > 1)
+        {
+            numsInThread = arrLen / threadNum;
+        }
+
+        int largestNum = int.MinValue;
+        int countNum = 0;
+
         Stopwatch sw = Stopwatch.StartNew();
 
-        for (int i = 0; i < p; i++)
+        for (int i = 0; i < threadNum; i++)
         {
-            int s = i * step;
-            int e = (i == p - 1) ? n : (i + 1) * step;
-            threads[i] = new Thread(() => ThreadFuncMutex(arr, s, e, ref max, ref count, mtx));
+            int start = i * numsInThread;
+            int end = (i == threadNum - 1) ? arrLen : (i + 1) * numsInThread;
+
+            threads[i] = new Thread(() => ThreadFuncAtomic(array, start, end, ref largestNum, ref countNum));
             threads[i].Start();
         }
 
-        foreach (var t in threads) t.Join();
+        for (int i = 0; i < threadNum; i++)
+        {
+            threads[i].Join();
+        }
+
         sw.Stop();
+        Console.WriteLine($"atomic:\tlargest: {largestNum}\tcount: {countNum}\ttime: {sw.Elapsed.TotalMilliseconds:F4} ms");
+        return sw.Elapsed.TotalMilliseconds;
+    }
+
+    static double ThreadsMutex(int threadNum, int[] array, int arrLen)
+    {
+        Thread[] threads = new Thread[threadNum];
+        int numsInThread = arrLen;
+        object gateMutex = new object();
+
+        if (threadNum > 1)
+        {
+            numsInThread = arrLen / threadNum;
+        }
+
+        int largestNum = int.MinValue;
+        int countNum = 0;
+
+        Stopwatch sw = Stopwatch.StartNew();
+
+
+        for (int i = 0; i < threadNum; i++)
+        {
+            int start = i * numsInThread;
+            int end = (i == threadNum - 1) ? arrLen : (i + 1) * numsInThread;
+
+            threads[i] = new Thread(() => ThreadFuncMutex(array, start, end, ref largestNum, ref countNum, gateMutex));
+            threads[i].Start();
+        }
+
+        for (int i = 0; i < threadNum; i++)
+        {
+            threads[i].Join();
+        }
+
+        sw.Stop();
+        Console.WriteLine($"mutex:\tlargest: {largestNum}\tcount: {countNum}\ttime: {sw.Elapsed.TotalMilliseconds:F4} ms");
         return sw.Elapsed.TotalMilliseconds;
     }
 
     static void Main()
     {
-        Random rnd = new Random();
-        int[] sizes = { 1000, 10000, 100000, 1000000, 10000000 };
-        int p = 4;
+        Random rand = new Random();
+        
+        int[] arraySizes = { 1000, 10000, 100000, 1000000, 10000000 };
+        int fixedThreads = 4;
 
-        using (StreamWriter wr = new StreamWriter("benchmark_mutex.csv"))
+        using (StreamWriter writer = new StreamWriter("benchmark_sizes.csv"))
         {
-            wr.WriteLine("ArraySize,SeqTime,MutexTime");
-            foreach (int n in sizes)
-            {
-                int[] arr = new int[n];
-                for (int i = 0; i < n; i++) arr[i] = rnd.Next(0, n);
+            writer.WriteLine("ArraySize,SeqTime,AtomicTime,MutexTime");
 
-                double tSeq = FindMaxSeq(arr, n);
-                double tMtx = FindMaxMutex(p, arr, n);
-                wr.WriteLine($"{n},{tSeq.ToString(CultureInfo.InvariantCulture)},{tMtx.ToString(CultureInfo.InvariantCulture)}");
+            foreach (int n in arraySizes)
+            {
+                Console.WriteLine($"\n--- Testing array size: {n} ---");
+                
+                int[] arr = new int[n];
+                for (int i = 0; i < n; i++)
+                {
+                    arr[i] = rand.Next(0, n);
+                }
+
+                double seqTime = DefFunc(arr, n);
+                double atomicTime = ThreadsAtomic(fixedThreads, arr, n);
+                double mutexTime = ThreadsMutex(fixedThreads, arr, n);
+
+                writer.WriteLine($"{n},{seqTime.ToString(CultureInfo.InvariantCulture)},{atomicTime.ToString(CultureInfo.InvariantCulture)},{mutexTime.ToString(CultureInfo.InvariantCulture)}");
             }
         }
+        
+        Console.WriteLine("\nDone! Results saved to 'benchmark_sizes.csv'");
     }
 }
